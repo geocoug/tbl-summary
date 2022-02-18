@@ -1,328 +1,286 @@
 #! /usr/bin/python
+# -*- coding: utf-8 -*-
 # tbl-summary.py
-#
-# PURPOSE:
-#       Create a summary of unique values for each column in a table.
-#
-# I/O:
-#       Input: PostgreSQL table
-#       Output: XLSX table
-#
-# NOTES:
-#       1. Columns with "number" data types are not always included in dataframe.describe. CG.
-#
-# AUTHORS:
-#       Caleb Grant (CG), Integral Consulting Inc.
-#
-# HISTORY:
-#                             Date                     Comments
-#                             ---------- -------------------------------------------------------------------------
-#                             2020-10-23          Created.  CG.
-#                             2020-10-26          Added header, comments. CG.
-#                   Included outfile (-f) as script argument. Not a polished function. Should review. CG.
-#                   Changed filter behavior for output. Instances where max worksheet dimension
-#                       is falsly represented by metadata written in cells B1:G2.
-#       2020-11-30  Error parsing date values. Attempt to fix by forcing np.datetime to string. CG.
-#       2020-12-07  Change handling of datetime objects. Try Y-M-D H:M:S first, then Y-M-D. If both
-#                       attempt fail, write object as string. CG.
-#============================================================================================
- 
-# Standard libraries
-import os
-import sys
+
+"""
+PURPOSE
+    Create a summary of unique values for each column in a table.
+
+AUTHOR
+    Caleb Grant (CG)
+
+HISTORY
+    Date          Remarks
+    ----------	--------------------------------------------------
+    2022-02-18    Created.  CG.
+=================================================================="""
+
 import argparse
-from getpass import getpass
- 
-# Third-party libraries
-import psycopg2
+import getpass
+import os
+
+import openpyxl
 import pandas as pd
-import numpy
-from openpyxl import load_workbook
-from openpyxl.styles import Border, Side, Alignment, PatternFill, Font, Color
-from openpyxl.utils.cell import get_column_letter, coordinate_from_string, column_index_from_string
- 
- 
-# Command line argument parser
-def CLI():
-    descrip = "Extract unique values and frequency for each column in a PostgreSQL table. Output saved to your current working directory."
-    parser = argparse.ArgumentParser(description=descrip)
-    parser.add_argument("-v", "--host",
-                            action="store", dest="host", default="env3",
-                            help="Server host name. Default = env3.")
-    parser.add_argument("-u", "--user",
-                            action="store", dest="user", default=None, required=True,
-                            help="Username for host authentication.")
-    parser.add_argument("-d", "--database",
-                            action="store", dest="database", default=None, required=True,
-                            help="Database name")
-    parser.add_argument("-s", "--schema",
-                            action='store', dest="schema", default="idb",
-                            help="Schema name. Default = idb.")
-    parser.add_argument("-t", "--table",
-                            action="store", dest="table", default=None, required=True,
-                            help="Table name.")
-    parser.add_argument("-f", "--filename",
-                            action="store", dest="outfile", default=None,
-                            help='Name of the output file (without extension). File will be saved to your current working directory.')
-    return parser
- 
- 
-# OPEN DATABASE CONNECTION
-def DB_Connect():
-    connection_str = "host='%s' user='%s' password='%s' dbname='%s'" %(host, user, password, database)
-    conn = None
-    try:
-       conn = psycopg2.connect(connection_str)
-       cur = conn.cursor()
-       return conn, cur
-    except Exception as error:
-       print(error)
-       sys.exit()
- 
- 
-# CLOSE DATABASE CONNECTION
-def DB_Close(conn):
-    if conn is not None:
-        conn.close()
- 
- 
-# QUERY DATABASE TABLE
-def pulldata():
-    conn, cur = DB_Connect()
-    try:
-        sql = """
-            SELECT * FROM {}.{}
-            """.format(schema, table)
-        cur.execute(sql)
-        data = cur.fetchall()
-        cols = [i.name for i in cur.description]
-    except Exception as error:
-        print(error)
-    finally:
-        DB_Close(conn)
- 
-    return cols, data
- 
- 
-# DATA SUMMARY OBJECT
-class DataSummary(object):
-    def __init__(self, df):
-        if not df.empty:
-            self.description = df.describe(percentiles=None, include='all')
-            self.dtype = df.dtypes
-            self.unique_vals = None
-            self.unique(df)
-            self.shape = df.shape
-        else:
-            self.description = None
-            self.dtype = None
-    def unique(self, df):
-        self.unique_vals = {}
-        for col in df.columns:
+import psycopg2
+from openpyxl.styles import Border, Color, Font, PatternFill, Side
+from openpyxl.utils.cell import get_column_letter
+
+__version__ = "0.1.1"
+__vdate = "2022-02-18"
+
+
+class Database():
+    '''Base class to connect to a database and execute procedures.'''
+
+    def __init__(self, host, db, user, password=None):
+        self.host = host
+        self.db = db
+        self.user = user
+        self.password = password
+        self.conn = None
+        self.password = self.get_password()
+
+    def get_password(self):
+        return getpass.getpass("Enter your password for %s" % self.__repr__())
+
+    def open_db(self):
+        if self.conn is not None:
+            self.conn.close()
+        if self.password is not None:
             try:
-                self.unique_vals.update({col: sorted(df[col].unique())})
-            except:
-                # Occurances where "<" not a valid operator (sorted func) because of data type mismatch. Usually due to null values.
-                df_c = df[col]
-                df_c.dropna(axis='rows', inplace=True)
-                self.unique_vals.update({col: sorted(df_c.unique())})
- 
- 
-# WRITE OUTPUT
-def writeSummary(file):
-    # Excel cell formatting
+                self.conn = psycopg2.connect(f"""
+                    host='{self.host}'
+                    dbname='{self.db}'
+                    user='{self.user}'
+                    password='{self.password}'
+                    """)
+            except psycopg2.OperationalError as err:
+                raise err
+
+    def cursor(self):
+        if self.conn is None:
+            self.open_db()
+        return self.conn.cursor()
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def execute(self, sql):
+        cur = self.cursor()
+        try:
+            cur.execute(sql)
+        except Exception as err:
+            raise err
+        return cur
+
+    def has_row(self, sql):
+        cur = self.execute(sql)
+        if cur.fetchone():
+            return True
+        else:
+            return False
+
+    def __repr__(self):
+        return u"""Database(host=%s, database=%s, user=%s)""" % (
+            self.host, self.db, self.user)
+
+
+class DataSummary():
+    '''Methods used to create attributes which summarize a data table.'''
+
+    def __init__(self, db_inst, schema, table):
+        self.db_inst = db_inst
+        self.schema = schema
+        self.table = table
+        self.data = self.table_data()[0]
+        self.total_rows = self.table_data()[1]
+        self.df = pd.DataFrame(
+            self.data,
+            columns=self.columns()
+        )
+
+    def __repr__(self):
+        return f"""DataSummary({self.db_inst},
+                                schema={self.schema},
+                                table={self.table})"""
+
+    def columns(self):
+        cur = self.db_inst.execute(f"""SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = '{self.schema}'
+                            AND table_name = '{self.table}';""")
+        return self.column_rows(cur)
+
+    def unique(self, col):
+        cur = self.db_inst.execute(f"""SELECT distinct "{col}"
+                                        FROM "{self.schema}"."{self.table}"
+                                        ORDER BY "{col}" NULLS LAST;""")
+        return self.column_rows(cur), cur.rowcount
+
+    def value_count(self, col):
+        cur = self.db_inst.execute(f"""SELECT COUNT("{col}")
+                                        FROM "{self.schema}"."{self.table}";
+                                    """)
+        return cur.fetchone()[0]
+
+    def column_rows(self, cur):
+        return [v[0] for v in cur]
+
+    def most_frequent_value(self, col):
+        cur = self.db_inst.execute(f"""SELECT "{col}", COUNT(*)
+                                        FROM "{self.schema}"."{self.table}"
+                                        GROUP BY "{col}"
+                                        ORDER BY COUNT DESC
+                                        LIMIT 1;""")
+        return cur.fetchone()[0], cur.rowcount
+
+    def table_data(self):
+        cur = self.db_inst.execute(
+            f"""SELECT * FROM "{self.schema}"."{self.table}";""")
+        return cur.fetchall(), cur.rowcount
+
+
+def clparser():
+    '''Create a parser to handle input arguments and displaying
+    a script specific help message.'''
+    desc_msg = """Create an ODF file of empty data tables with
+        matching columns to the specified database tables.
+        Version %s, %s""" % (__version__, __vdate)
+    parser = argparse.ArgumentParser(description=desc_msg)
+    parser.add_argument('output_file',
+                        help="Name of the XLSX output file")
+    parser.add_argument('-v', '--host', type=str, default='env3', dest='host',
+                        help="Server hostname.")
+    parser.add_argument('-d', '--database', type=str, dest='database',
+                        help="Database name.")
+    parser.add_argument('-s', '--schema', type=str, dest='schema',
+                        help='Database schema.')
+    parser.add_argument('-u', '--username', type=str, dest='username',
+                        help="Database username.")
+    parser.add_argument('-t', '--table', type=str, dest='table',
+                        help="Table name to summarize.")
+    return parser
+
+
+def write_summary(data, ofile):
+    '''Write results to an output file.'''
+    if os.path.exists(ofile):
+        os.remove(ofile)
+
+    wkb = openpyxl.Workbook()
+    sheet = wkb.active
+    sheet.title = 'Data Summary'
+
+    # Excel styling
     font = Font(
-                bold=True,
-                size=12
-    )
-    border = Border(
-                bottom=Side(border_style=None,
-                            color='FF000000'
-                           )
-    )
-    alignment = Alignment(
-                horizontal='general',
-                vertical='bottom',
-                text_rotation=0,
-                wrap_text=False,
-                shrink_to_fit=False,
-                indent=0
+        bold=True,
+        size=12
     )
     fill = PatternFill(
-                patternType='solid',
-                fgColor=Color('97b4c9')
+        patternType='solid',
+        fgColor=Color('97b4c9')
     )
     border_all = Border(
-                left=Side(border_style='thin', color=Color('000000')),
-                right=Side(border_style='thin', color=Color('000000')),
-                top=Side(border_style='thin', color=Color('000000')),
-                bottom=Side(border_style='thin', color=Color('000000'))
+        left=Side(border_style='thin', color=Color('000000')),
+        right=Side(border_style='thin', color=Color('000000')),
+        top=Side(border_style='thin', color=Color('000000')),
+        bottom=Side(border_style='thin', color=Color('000000'))
     )
- 
-    # Filter pandas dataframe.describe object
-    for index in desc.description.index:
-        if index not in ['freq', 'unique', 'top']:
-            desc.description.drop(index=index, inplace=True)
- 
-    # Write pandas dataframe.describe object to sheet
-    with pd.ExcelWriter(file) as writer:
-        desc.description.to_excel(writer, sheet_name='Data Summary')
- 
-    # Re-open workbook
-    wb = load_workbook(file)
-    ws = wb['Data Summary']
- 
-    # Delete first row (column names)
-    ws.delete_rows(1)
-    # Insert 3 blank rows at top of sheet
-    for i in range(3):
-        ws.insert_rows(1)
- 
-    col_index = 2
-    headers = list(desc.unique_vals)
-    # Write table column names
-    for col in range(len(desc.unique_vals)):
-        head = ws.cell(row=7, column=col_index)
-        head.value = headers[col]
-        head.font=font
-        head.border=border_all
-        head.fill=fill
- 
-        # Write unique values for each table column
-        for row in range(len(desc.unique_vals[headers[col]])):
-            cell = ws.cell(row=row+8, column=col_index)
-            # Case for timestamp columns          
-            if isinstance(desc.unique_vals[headers[col]][row], numpy.datetime64):
-                if pd.isnull(numpy.datetime64(desc.unique_vals[headers[col]][row])):
-                    cell.value = None
-                else:
-                    try:
-                        cell.value = pd.to_datetime(str(desc.unique_vals[headers[col]][row])).strftime('%Y-%m-%d %H:%M:%S')
-                    except:
-                        try:
-                            cell.value = pd.to_datetime(str(desc.unique_vals[headers[col]][row])).strftime('%Y-%m-%d')
-                        except:
-                            cell.value = str(desc.unique_vals[headers[col]][row])
-            else:
-                cell.value = str(desc.unique_vals[headers[col]][row])
- 
-        col_index += 1
- 
-    # Manually write and format to cells
-    c=ws.cell(row=4, column=1)
-    c.value = '# of unique values'
-    c.font=font
-    c.border=border
-    c.alignment=alignment
- 
-    c=ws.cell(row=5, column=1)
-    c.value = 'most frequent value'
-    c.font=font
-    c.border=border
-    c.alignment=alignment
- 
-    c=ws.cell(row=6, column=1)
-    c.value = 'value frequency'
-    c.font=font
-    c.border=border
-    c.alignment=alignment
- 
-    c=ws.cell(row=7, column=1)
-    c.value = 'column names'
-    c.font=font
-    c.border=border
-    c.alignment=alignment
- 
-    ws.cell(row=1, column=2).value = 'Host'
-    ws.cell(row=1, column=2).font=font
-    ws.cell(row=2, column=2).value = host
- 
-    ws.cell(row=1, column=3).value = 'Database'
-    ws.cell(row=1, column=3).font=font
-    ws.cell(row=2, column=3).value = database
- 
-    ws.cell(row=1, column=4).value = 'Schema'
-    ws.cell(row=1, column=4).font=font
-    ws.cell(row=2, column=4).value = schema
- 
-    ws.cell(row=1, column=5).value = 'Table'
-    ws.cell(row=1, column=5).font=font
-    ws.cell(row=2, column=5).value = table
- 
-    ws.cell(row=1, column=6).value = 'Total Rows'
-    ws.cell(row=1, column=6).font=font
-    ws.cell(row=2, column=6).value = desc.shape[0]
- 
-    ws.cell(row=1, column=7).value = 'Description'
-    ws.cell(row=1, column=7).font=font
-    ws.cell(row=2, column=7).value = 'Showing distinct values for each column in table. Columns with no values are excluded.'
- 
-    # Get worksheet dimensions.
-    ws_dimensions = ws.dimensions
-    end_dim = ws_dimensions.split(":")[-1]
-    # Check to see if column "G" is the max column
-    # Metadata is written to cells B1:G2 so column G may not be the actual max dimension of the table
-    end_col = column_index_from_string(coordinate_from_string(end_dim)[0])
-    end_row = coordinate_from_string(end_dim)[1]
-    if end_col == 7:
-        tot_cols = len(headers) + 1
-        target_col = get_column_letter(tot_cols)
-        end_dim = "{}{}".format(target_col, end_row)
- 
-    # Turn on filter
-    ws.auto_filter.ref = "B7:{}".format(end_dim)
-    # Change column A cell width
-    ws.column_dimensions['A'].width = 25
- 
-    wb.save(file)
- 
- 
-# BEGIN SCRIPT
+
+    # Summary header
+    sheet.cell(row=1, column=2).value = "Host"
+    sheet.cell(row=1, column=2).font = font
+    sheet.cell(row=2, column=2).value = data.db_inst.host
+
+    sheet.cell(row=1, column=3).value = "Database"
+    sheet.cell(row=1, column=3).font = font
+    sheet.cell(row=2, column=3).value = data.db_inst.db
+
+    sheet.cell(row=1, column=4).value = "Schema"
+    sheet.cell(row=1, column=4).font = font
+    sheet.cell(row=2, column=4).value = data.schema
+
+    sheet.cell(row=1, column=5).value = "Table"
+    sheet.cell(row=1, column=5).font = font
+    sheet.cell(row=2, column=5).value = data.table
+
+    sheet.cell(row=1, column=6).value = "Total Rows"
+    sheet.cell(row=1, column=6).font = font
+    sheet.cell(row=2, column=6).value = data.total_rows
+
+    sheet.cell(row=1, column=7).value = "Description"
+    sheet.cell(row=1, column=7).font = font
+    sheet.cell(
+        row=2, column=7).value = "Distinct values for each column in a table."
+
+    # Summary results
+    for col in range(len(data.columns())):
+        # column = data.columns()[col]
+        if col == 0:
+            sheet.cell(row=4, column=col + 1).value = "# of unique values"
+            sheet.cell(row=4, column=col + 1).font = font
+            sheet.cell(row=5, column=col + 1).value = "most frequent value"
+            sheet.cell(row=5, column=col + 1).font = font
+            sheet.cell(row=6, column=col + 1).value = "value frequency"
+            sheet.cell(row=6, column=col + 1).font = font
+            sheet.cell(row=7, column=col + 1).value = "column name"
+            sheet.cell(row=7, column=col + 1).font = font
+        # Number of unique values
+        sheet.cell(row=4,
+                   column=col + 2).value = data.unique(data.columns()[col])[1]
+        # Most frequent value
+        sheet.cell(row=5,
+                   column=col + 2).value = data.most_frequent_value(data.columns()[col])[0]
+        # Value frequency
+        sheet.cell(row=6,
+                   column=col + 2).value = data.most_frequent_value(data.columns()[col])[1]
+        # Column names
+        sheet.cell(row=7, column=col + 2).value = data.columns()[col]
+        sheet.cell(row=7, column=col + 2).font = font
+        sheet.cell(row=7, column=col + 2).border = border_all
+        sheet.cell(row=7, column=col + 2).fill = fill
+        # Unique column values
+        row = 8
+        for value in data.unique(data.columns()[col])[0]:
+            sheet.cell(row=row, column=col + 2).value = value
+            row += 1
+        # Turn on filter
+        sheet.auto_filter.ref = f"B7:{get_column_letter(len(data.columns()) + 1)}7"
+        # Column A cell width
+        sheet.column_dimensions['A'].width = 25
+
+    wkb.save(ofile)
+
+
 if __name__ == "__main__":
-    global args
-    parser = CLI()
-    try:
-        args = parser.parse_args()
-    except:
-        parser.print_help()
-        sys.exit(1)
- 
-    # Get argparse namespace variables
-    host=args.host
-    user=args.user
-    database=args.database
-    schema=args.schema
-    table=args.table
- 
-    # Make sure file name argument is valid
-    # Not a polished check, could use revision
-    if args.outfile:
-        outfile = args.outfile + ".xlsx"
-        is_valid = False
-        try:
-            with open(os.path.join(os.getcwd(), outfile), 'w') as f:
-                pass
-            os.remove(os.path.join(os.getcwd(),outfile))
-        except:
-            print("Filename not valid.")
-            sys.exit()
-    else:
-        outfile= "{}.{}-summary.xlsx".format(schema, table)
- 
-    # Prompt user for password
-    password = getpass(prompt="Password for (host={} | user={}):".format(host, user))
- 
-    print('Compiling summary.')
-    # Database query
-    cols, data = pulldata()
-    # Query results to dataframe format
-    df = pd.DataFrame(data, columns=cols)
-    # Drop columns that contail no records
-    df.dropna(axis='columns', how='all', inplace=True)
-    # Create summary
-    desc = DataSummary(df)
- 
-    print('Writing output.')
-    writeSummary(outfile)
- 
-    print('Done.')
+    parser = clparser()
+    args = parser.parse_args()
+
+    if args.output_file:
+        if not os.path.splitext(args.output_file)[-1] in ['.xlsx']:
+            raise Exception(f"File extension not valid: {args.output_file}")
+
+    db_inst = Database(
+        args.host,
+        args.database,
+        args.username
+    )
+
+    schema_sql = f"""SELECT schema_name
+              FROM information_schema.schemata
+              WHERE schema_name = '{args.schema}';"""
+    if not db_inst.has_row(schema_sql):
+        raise Exception(f"Schema does not exist: {args.schema}")
+
+    table_sql = f"""SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = '{args.schema}'
+                    AND table_name = '{args.table}';"""
+    if not db_inst.has_row(table_sql):
+        raise Exception(f"Table does not exist: {args.schema}.{args.table}")
+
+    data = DataSummary(db_inst, args.schema, args.table)
+
+    write_summary(data, args.output_file)
