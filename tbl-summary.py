@@ -4,7 +4,7 @@
 
 """
 PURPOSE
-    Create a summary of unique values for each column in a table.
+    Create a summary of unique values for each column in a Postgres table.
 
 AUTHOR
     Caleb Grant (CG)
