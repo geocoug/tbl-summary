@@ -145,8 +145,8 @@ class DataSummary():
 def clparser():
     '''Create a parser to handle input arguments and displaying
     a script specific help message.'''
-    desc_msg = """Create an ODF file of empty data tables with
-        matching columns to the specified database tables.
+    desc_msg = """Create a summary of unique values for each column
+        in a Postgres table. Summarize results in an Excel workbook.
         Version %s, %s""" % (__version__, __vdate)
     parser = argparse.ArgumentParser(description=desc_msg)
     parser.add_argument('output_file',
