@@ -277,7 +277,7 @@ def write_summary(data, ofile):
             sheet.cell(row=row, column=col + 2).value = value
             row += 1
         # Turn on filter
-        sheet.auto_filter.ref = f"B7:{get_column_letter(len(data.columns()) + 1)}7"
+        sheet.auto_filter.ref = f"B8:{get_column_letter(len(data.columns()) + 1)}8"
         # Column A cell width
         sheet.column_dimensions["A"].width = 25
 
