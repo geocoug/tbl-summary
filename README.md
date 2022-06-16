@@ -2,12 +2,10 @@
 
 Summarize a PostgreSQL table by unique values and their frequency.
 
-## Example
+## Usage
 
-### Usage
+`python tbl-summary.py --help`
 
-`python tbl-summary.py -v localhost -d db_name -s public -u cgrant -t tablename tablename-summary.xlsx`
-
-### Output
+## Output
 
 ![tablename-summary.xlsx](output.png)
